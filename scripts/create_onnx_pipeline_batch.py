@@ -88,7 +88,7 @@ class GaussianSmoothing(nn.Module):
             kernel *= (
                 1
                 / (std * math.sqrt(2 * math.pi))
-                * torch.exp(-(((mgrid - mean) / (2 * std)) ** 2))
+                * torch.exp(-((mgrid - mean) ** 2) / (2 * std**2))
             )
 
         kernel = kernel / torch.sum(kernel)
@@ -155,7 +155,7 @@ class MIGANPipelineBatch(nn.Module):
         Compute per-sample bounding boxes from mask (B,1,H,W) uint8 where 255=known, 0=hole.
         Returns (x_min, x_max, y_min, y_max, any_hole) each as int64 tensors of shape (B,).
         """
-        B, _, H, W = mask_uint8.shape
+        B, H, W = mask_uint8.size(0), mask_uint8.size(2), mask_uint8.size(3)
         device = mask_uint8.device
         # hole locations
         hole = mask_uint8[:, 0].to(torch.float32) < 255.0  # (B,H,W)
@@ -305,16 +305,18 @@ class MIGANPipelineBatch(nn.Module):
         w = (x_max - x_min).to(torch.float32).clamp(min=1.0)  # (B,)
         h = (y_max - y_min).to(torch.float32).clamp(min=1.0)
 
-        # coordinate maps for full image
+        # output pixel centers (X+0.5, Y+0.5)
         xx = (
             torch.arange(W, device=device, dtype=torch.float32)
             .view(1, 1, W)
             .expand(B, H, W)
+            + 0.5
         )
         yy = (
             torch.arange(H, device=device, dtype=torch.float32)
             .view(1, H, 1)
             .expand(B, H, W)
+            + 0.5
         )
 
         x_min_f = x_min.to(torch.float32).view(B, 1, 1)
@@ -322,9 +324,9 @@ class MIGANPipelineBatch(nn.Module):
         w_f = w.view(B, 1, 1)
         h_f = h.view(B, 1, 1)
 
-        # normalized coordinates in patch space
-        x_norm = 2.0 * (xx - x_min_f) / w_f - 1.0  # (B,H,W)
-        y_norm = 2.0 * (yy - y_min_f) / h_f - 1.0  # (B,H,W)
+        # normalized coords in patch space (align_corners=False)
+        x_norm = 2.0 * ((xx - x_min_f) / w_f) - 1.0
+        y_norm = 2.0 * ((yy - y_min_f) / h_f) - 1.0
 
         grid = torch.stack([x_norm, y_norm], dim=-1)  # (B,H,W,2)
         return grid
@@ -338,7 +340,7 @@ class MIGANPipelineBatch(nn.Module):
            composed batch: (B, 3, H, W) uint8
         """
         assert image.dim() == 4 and mask.dim() == 4, "Expect batched tensors"
-        B, _, H, W = image.shape
+        H, W = image.size(2), image.size(3)
         device = image.device
 
         # 1) Per-sample bounding boxes from mask
@@ -432,7 +434,7 @@ def get_args():
     parser.add_argument(
         "--invert-mask",
         action="store_true",
-        help="Invert mask? (make 0-known, 1-hole)",
+        help="Invert mask polarity (use if your masks are 255=hole). After inversion, 255=known, 0=hole.",
     )
     parser.add_argument(
         "--output-dir", type=Path, help="Output directory.", required=True

@@ -4,12 +4,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class lrelu_agc:
+class lrelu_agc(nn.Module):
     """
     The lrelu layer with alpha, gain and clamp
     """
 
     def __init__(self, alpha=0.2, gain=1, clamp=None):
+        super().__init__()
         self.alpha = alpha
         if gain == "sqrt_2":
             self.gain = np.sqrt(2)
@@ -17,8 +18,8 @@ class lrelu_agc:
             self.gain = gain
         self.clamp = clamp
 
-    def __call__(self, x, gain=1):
-        x = F.leaky_relu(x, negative_slope=self.alpha, inplace=True)
+    def forward(self, x, gain=1):
+        x = F.leaky_relu(x, negative_slope=self.alpha, inplace=False)
         act_gain = self.gain * gain
         act_clamp = self.clamp * gain if self.clamp is not None else None
         if act_gain != 1:
@@ -49,7 +50,7 @@ def setup_filter(
     if separable is None:
         separable = f.ndim == 1 and f.numel() >= 8
     if f.ndim == 1 and not separable:
-        f = f.ger(f)
+        f = torch.outer(f, f)
     assert f.ndim == (1 if separable else 2)
 
     # Apply normalize, flip, gain, and device.
@@ -75,10 +76,10 @@ class Downsample2d(nn.Module):
             bias=False,
             stride=2,
         )
-        f = setup_filter([1, 3, 3, 1], gain=1)
-        self.filter.weight = nn.Parameter(
-            f.repeat([*self.filter.weight.shape[:2], 1, 1])
-        )
+        f = setup_filter([1, 3, 3, 1], gain=1)  # (4, 4)
+        with torch.no_grad():
+            w = f.view(1, 1, 4, 4).repeat(in_channels, 1, 1, 1)
+            self.filter.weight.copy_(w)
 
     def forward(self, x):
         x = self.filter(x)
@@ -87,14 +88,14 @@ class Downsample2d(nn.Module):
 
 class Upsample2d(nn.Module):
     def __init__(self, in_channels, resolution=None):
+        assert resolution is not None
         super().__init__()
         self.nearest_up = nn.Upsample(scale_factor=2, mode="nearest")
-        w = torch.tensor([[1.0, 0.0], [0.0, 0.0]], dtype=torch.float32)
-        assert resolution is not None
-        self.register_buffer(
-            "filter_const", w.repeat(1, 1, resolution // 2, resolution // 2)
+        m = torch.tensor([[1.0, 0.0], [0.0, 0.0]], dtype=torch.float32)
+        mask = m.view(1, 1, 2, 2).repeat(
+            1, 1, resolution // 2, resolution // 2
         )
-
+        self.register_buffer("filter_const", mask)
         self.filter = nn.Conv2d(
             in_channels=in_channels,
             out_channels=in_channels,
@@ -102,11 +103,10 @@ class Upsample2d(nn.Module):
             groups=in_channels,
             bias=False,
         )
-
-        f = setup_filter([1, 3, 3, 1], gain=4)
-        self.filter.weight = nn.Parameter(
-            f.repeat([*self.filter.weight.shape[:2], 1, 1])
-        )
+        f = setup_filter([1, 3, 3, 1], gain=4)  # (4, 4)
+        with torch.no_grad():
+            w = f.view(1, 1, 4, 4).repeat(in_channels, 1, 1, 1)
+            self.filter.weight.copy_(w)
 
     def forward(self, x):
         x = self.nearest_up(x)
@@ -178,7 +178,7 @@ class SeparableConv2d(nn.Module):
 
         if self.use_noise:
             noise = self.noise_const * self.noise_strength
-            x = x.add_(noise)
+            x = x + noise
         if self.activation is not None:
             x = self.activation(x)
         return x
@@ -351,7 +351,7 @@ class SynthesisBlock(nn.Module):
 
         if self.torgb is not None:
             y = self.torgb(x)
-            img = img.add_(y) if img is not None else y
+            img = img + y if img is not None else y
 
         return x, img
 
